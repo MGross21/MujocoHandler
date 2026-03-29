@@ -481,7 +481,11 @@ class Simulation:
                     self._model, self._data, self._keyframe,
                 )
 
-            sim_data = _SimulationData()
+            # Simulation Timing - calculate first
+            total_steps = int(self._duration / self.ts)
+            capture_interval = max(1, int(1.0 / (self._dr * self.ts))) # PEMDAS :)
+
+            sim_data = _SimulationData(capacity=total_steps)
 
             # Cache frequently used functions and objects for performance
             mj_step1 = mujoco.mj_step1
@@ -489,11 +493,6 @@ class Simulation:
             m, d = self._model, self._data
 
             # dur = self._duration
-
-            # Simulation Timing
-            total_steps = int(self._duration / self.ts)
-            # capture_rate = self.data_rate * self.ts
-            capture_interval = max(1, int(1.0 / (self._dr * self.ts))) # PEMDAS :)
 
 
             # RENDERING PREPARATIONS
@@ -918,115 +917,149 @@ class Simulation:
 
 
 class _SimulationData:
-    """A class to store and manage simulation data."""
+    """Optimized class to store and manage simulation data with pre-allocation."""
 
-    __slots__ = ["_d"]
+    __slots__ = ["_data", "_keys", "_step_count", "_capacity", "_initialized"]
 
-    def __init__(self) -> None:
-        self._d: dict[str, list] = defaultdict(list)
+    def __init__(self, capacity: int = 10000) -> None:
+        """Initialize with pre-allocated capacity for better performance.
+        
+        Args:
+            capacity: Expected number of simulation steps for pre-allocation
+        """
+        self._data: dict[str, np.ndarray] = {}
+        self._keys: set[str] = set()
+        self._step_count: int = 0
+        self._capacity: int = capacity
+        self._initialized: bool = False
 
-    def _is_capture_all(self, params) -> bool:
-        """Check if all data is captured."""
-        if params is all:
-            return True
-        if isinstance(params, set):
-            return ("all" in map(str.lower, params))
-        if isinstance(params, str):
-            return params.lower() == "all"
-        return None
-
-    def capture(self, mj_data) -> None:
-        """Capture data from MjData, storing specified or all public attributes."""
-        from . import CAPTURE_PARAMETERS
-
-        if (self._is_capture_all(CAPTURE_PARAMETERS)):
-            keys = self.get_public_keys(mj_data) # TODO: Fix this to be more efficient. Is cycling on every sim step.
-        else:
-            keys = CAPTURE_PARAMETERS
-
+    def _initialize_storage(self, mj_data, keys: set[str]) -> None:
+        """Initialize pre-allocated storage based on first data sample."""
+        self._keys = keys
+        
         for key in keys:
             value = getattr(mj_data, key, None)
             if value is None:
                 continue
+                
             if isinstance(value, np.ndarray):
-                self._d[key].append(value.copy())
+                # Pre-allocate array with extra dimension for time
+                shape = (self._capacity,) + value.shape
+                self._data[key] = np.empty(shape, dtype=value.dtype)
             elif np.isscalar(value):
-                self._d[key].append(value)
-            elif hasattr(value, "copy") and callable(value.copy):
-                self._d[key].append(value.copy())
+                # Pre-allocate 1D array for scalars
+                self._data[key] = np.empty(self._capacity, dtype=type(value))
             else:
-                self._d[key].append(value)
+                # Fallback to list for complex types
+                self._data[key] = []
+                
+        self._initialized = True
+
+    def _get_capture_keys(self, mj_data) -> set[str]:
+        """Get capture keys, with caching for 'all' parameters."""
+        from . import CAPTURE_PARAMETERS
+        
+        if CAPTURE_PARAMETERS is all:
+            return self.get_public_keys(mj_data)
+        elif isinstance(CAPTURE_PARAMETERS, (set, list, tuple)):
+            if any(str(p).lower() == "all" for p in CAPTURE_PARAMETERS):
+                return self.get_public_keys(mj_data)
+            return set(CAPTURE_PARAMETERS)
+        elif isinstance(CAPTURE_PARAMETERS, str) and CAPTURE_PARAMETERS.lower() == "all":
+            return self.get_public_keys(mj_data)
+        else:
+            return set(CAPTURE_PARAMETERS) if CAPTURE_PARAMETERS else set()
+
+    def capture(self, mj_data) -> None:
+        """Optimized capture using pre-allocated arrays."""
+        # Initialize on first capture
+        if not self._initialized:
+            keys = self._get_capture_keys(mj_data)
+            self._initialize_storage(mj_data, keys)
+        
+        # Resize if needed (rare case)
+        if self._step_count >= self._capacity:
+            self._resize_storage()
+        
+        # Fast capture loop - no isinstance checks per step
+        for key in self._keys:
+            value = getattr(mj_data, key, None)
+            if value is None:
+                continue
+                
+            storage = self._data[key]
+            if isinstance(storage, np.ndarray):
+                if isinstance(value, np.ndarray):
+                    storage[self._step_count] = value
+                else:
+                    storage[self._step_count] = value
+            else:
+                # List fallback for complex types
+                storage.append(value.copy() if hasattr(value, "copy") else value)
+        
+        self._step_count += 1
+
+    def _resize_storage(self) -> None:
+        """Resize storage when capacity is exceeded."""
+        new_capacity = self._capacity * 2
+        
+        for key, storage in self._data.items():
+            if isinstance(storage, np.ndarray):
+                new_shape = (new_capacity,) + storage.shape[1:]
+                new_storage = np.empty(new_shape, dtype=storage.dtype)
+                new_storage[:self._capacity] = storage
+                self._data[key] = new_storage
+            # Lists don't need resizing
+                
+        self._capacity = new_capacity
 
     def unwrap(self) -> dict[str, np.ndarray]:
-        """Unwrap simulation data into a structured format with NumPy arrays.
-
-        Returns:
-            dict[str, np.ndarray]: Unwrapped data for each key.
-
-        """
+        """Unwrap simulation data into final arrays, trimmed to actual data size."""
         unwrapped_data = {}
 
-        for key, value_list in self._d.items():
-            if not value_list:
-                unwrapped_data[key] = np.array([])
-                continue
-
-            first = value_list[0]
-
-            try:
-                if isinstance(first, np.ndarray):
-                    shape = first.shape
-                    if all(v.shape == shape for v in value_list):
-                        unwrapped_data[key] = np.stack(value_list)
-                    else:
-                        unwrapped_data[key] = value_list  # Inconsistent shapes
-                else:
-                    unwrapped_data[key] = np.array(value_list)
-            except (ValueError, TypeError):
-                unwrapped_data[key] = value_list  # Fallback
+        for key, storage in self._data.items():
+            if isinstance(storage, np.ndarray):
+                # Trim to actual data size
+                unwrapped_data[key] = storage[:self._step_count]
+            else:
+                # Convert lists to arrays
+                try:
+                    unwrapped_data[key] = np.array(storage)
+                except (ValueError, TypeError):
+                    unwrapped_data[key] = storage  # Keep as list if conversion fails
 
         return unwrapped_data
 
     @property
     def shape(self) -> dict[str, tuple]:
         """Return the shape of the captured data per key."""
-        if not self._d:
-            return {}
-
-        shapes: dict[str, tuple[Any, ...]] = {}
-        for key, value_list in self._d.items():
-            if not value_list:
-                shapes[key] = ()
-                continue
-
-            first_value = value_list[0]
-            if isinstance(first_value, np.ndarray):
-                shapes[key] = (len(value_list), *first_value.shape)
-            elif isinstance(first_value, list) and all(isinstance(v, list) for v in value_list):
-                shapes[key] = (len(value_list), len(first_value))
+        shapes = {}
+        for key, storage in self._data.items():
+            if isinstance(storage, np.ndarray):
+                actual_shape = (self._step_count,) + storage.shape[1:]
+                shapes[key] = actual_shape
             else:
-                shapes[key] = (len(value_list),)
-
+                shapes[key] = (len(storage),)
         return shapes
 
     def clear(self) -> None:
-        """Clear all captured data."""
-        self._d.clear()
+        """Clear all captured data and reset counters."""
+        self._data.clear()
+        self._keys.clear()
+        self._step_count = 0
+        self._initialized = False
 
     def keys(self) -> set[str]:
         """Return a set of all captured data keys."""
-        return set(self._d.keys())
+        return self._keys.copy()
 
-    def items(self) -> dict[str, list]:
-        """Return raw captured data as a dict of lists."""
-        return dict(self._d)
+    def items(self) -> dict[str, np.ndarray]:
+        """Return unwrapped data items."""
+        return self.unwrap()
 
     def __len__(self) -> int:
-        """Return the number of captured steps (based on first key)."""
-        if not self._d:
-            return 0
-        first_key = next(iter(self._d))
-        return len(self._d[first_key])
+        """Return the number of captured steps."""
+        return self._step_count
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}({len(self)} Step(s) Captured)"
@@ -1036,8 +1069,8 @@ class _SimulationData:
 
     def __del__(self) -> None:
         """Safely clean up resources during object deletion."""
-        if hasattr(self, "_d"):
-            self._d.clear()
+        if hasattr(self, "_data"):
+            self._data.clear()
 
     @staticmethod
     def get_public_keys(obj: object) -> set[str]:
