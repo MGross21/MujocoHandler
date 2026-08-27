@@ -153,7 +153,7 @@ python_files = ["test_*.py"]
 addopts = "--import-mode=importlib"
 
 [tool.ruff]
-line-length = 79
+line-length = 120
 target-version = "py310"
 extend-exclude = ["docs/_build", "local_testing"]
 

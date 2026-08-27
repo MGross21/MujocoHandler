@@ -169,7 +169,7 @@ import mujoco_toolbox as mjtb
 from mujoco_toolbox.controllers import real_time
 
 with mjtb.Simulation("path/to/xml", controller=real_time) as digitaltwin:
-    digitaltwin.launch(show_menu=False) # Open the simulation window
+    digitaltwin.launch(show_menu=False)  # Open the simulation window
     while True:
         digitaltwin.controller(digitaltwin.model, digitaltwin.data, {"mjdata_kwargs": value})
 ```
@@ -207,7 +207,6 @@ import mujoco_toolbox as mjtb
 
 # Merges: XML & URDF Files, XML & URDF Strings, Sub Tree Structures
 mjtb.Simulation("path/to/xml_1", string_xml_var, ..., "path/to/xml_n").show()
-
 ```
 
 > **⚠️ WARNING**  
