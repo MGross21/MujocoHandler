@@ -14,7 +14,12 @@ from collections import defaultdict
 from contextlib import nullcontext
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 import defusedxml.ElementTree as ET
 import imageio.v3 as iio

@@ -1,5 +1,12 @@
 """Additional tests for mujoco_toolbox to maximize pytest coverage."""
-from typing import Never
+from __future__ import annotations
+
+import sys
+
+if sys.version_info >= (3, 11):
+    from typing import Never
+else:
+    from typing_extensions import Never
 
 import numpy as np
 import pytest
